@@ -1,0 +1,99 @@
+name: CI - Build APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            python3.10 python3.10-venv python3.10-dev python3-pip unzip wget openjdk-17-jdk \
+            lib32z1 lib32ncurses6 lib32stdc++6 lib32gcc-s1 libc6-i386 \
+            build-essential git curl
+          python3.10 -m pip install --upgrade pip
+
+      - name: Setup Android SDK + NDK
+        run: |
+          ANDROID_SDK_ROOT=/usr/local/android-sdk
+          sudo mkdir -p $ANDROID_SDK_ROOT/cmdline-tools
+          sudo chown $USER $ANDROID_SDK_ROOT -R
+
+          wget -q https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip -O cmdline-tools.zip
+          unzip -q cmdline-tools.zip -d $ANDROID_SDK_ROOT/cmdline-tools
+          mkdir -p $ANDROID_SDK_ROOT/cmdline-tools/latest
+          mv $ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools/* $ANDROID_SDK_ROOT/cmdline-tools/latest/
+          chmod +x $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager
+
+          export PATH=$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH
+          yes | sdkmanager --licenses
+          sdkmanager --update
+          sdkmanager "platform-tools" "platforms;android-33" "build-tools;33.0.2" "ndk;23.1.7779620"
+
+      - name: Setup Python virtualenv & Buildozer
+        run: |
+          python3.10 -m venv venv
+          source venv/bin/activate
+          pip install --upgrade pip
+          pip install buildozer cython
+
+      - name: Build APKs (Debug + Release)
+        run: |
+          source venv/bin/activate
+          export ANDROID_HOME=/usr/local/android-sdk
+          export ANDROID_SDK_ROOT=/usr/local/android-sdk
+          export ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/23.1.7779620
+          export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+          export PATH=$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$PATH
+
+          yes | sdkmanager --licenses
+
+          # Ensure multiple architectures
+          sed -i 's|#android.arch = arm64-v8a|android.arch = armeabi-v7a, arm64-v8a, x86|' buildozer.spec
+
+          # Clean previous builds
+          buildozer android clean
+
+          # Build APKs without deploy run, capture logs
+          buildozer android debug --verbose 2>&1 | tee build_debug.log
+          buildozer android release --verbose 2>&1 | tee build_release.log
+
+      - name: Save build debug logs
+        if: always()
+        run: |
+          echo "Saving build debug log..."
+          cat build_debug.log
+
+      - name: Save build release logs
+        if: always()
+        run: |
+          echo "Saving build release log..."
+          cat build_release.log
+
+      - name: Locate APKs
+        id: find_apks
+        run: |
+          echo "Listing APK files:"
+          mkdir -p apks
+          find . -name "*.apk" -exec cp {} apks/ \;
+          if [ ! "$(ls -A apks)" ]; then
+            echo "No APKs found!"
+            exit 1
+          fi
+          echo "APKS_DIR=apks" >> $GITHUB_OUTPUT
+
+      - name: Upload APK artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apks
+          path: ${{ steps.find_apks.outputs.APks_DIR }}
